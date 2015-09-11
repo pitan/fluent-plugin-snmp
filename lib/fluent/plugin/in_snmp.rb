@@ -13,7 +13,7 @@ module Fluent
     config_param :polling_time, :string, :default => nil
     config_param :polling_offset, :time, :default => 0
     config_param :polling_type, :string, :default => "run" #or async_run
-    config_param :method_type, :string, :default => "walk" #or get
+    config_param :method_type, :string, :default => "walk" #or get, bulkwalk
     config_param :out_executor, :string, :default => nil
 
     # SNMP Lib Params
@@ -145,6 +145,8 @@ module Fluent
           snmp_walk(opts[:manager], opts[:mib], opts[:nodes])
         when /^get$/
           snmp_get(opts[:manager], opts[:mib], opts[:nodes])
+        when /^bulkwalk$/
+          snmp_bulkwalk(opts[:manager], opts[:mib], opts[:nodes])
         else
           $log.error "unknow exec method"
           raise
@@ -157,6 +159,35 @@ module Fluent
     rescue => ex
       $log.error "exec_snmp failed #{@tag}", :error=>ex.inspect
       $log.error_backtrace ex.backtrace
+      raise ex
+    end
+    
+    BULK_MAX=30
+    def snmp_bulkwalk(manager, mib, nodes, test=false)
+      vb_list = manager.mib.varbind_list(mib, :NullValue)
+      count, last, oid = 0, false, []
+      vb_list.each do |vb|
+        oid << vb.name
+      end
+      start_oid = oid[0]
+      while not last
+        manager.get_bulk(0, BULK_MAX, oid).each_varbind do |vb|
+          time = Engine.now
+          time = time - time % 5
+          record = {}
+          if nodes.nil?
+            record["value"] = vb
+          else
+            nodes.each{|param| record[param] = check_type(vb.__send__(param))}
+          end
+          oid[count % oid.size] = vb.oid
+          (last = true; break) if not oid[0][0..start_oid.size-1] == start_oid
+          Engine.emit(@tag, time, record)
+          return {:time => time, :record => record} if test
+          count = count + 1
+        end
+      end
+    rescue => ex
       raise ex
     end
 
